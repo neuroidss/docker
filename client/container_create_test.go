@@ -22,7 +22,7 @@ func TestContainerCreateError(t *testing.T) {
 		t.Fatalf("expected a Server Error while testing StatusInternalServerError, got %v", err)
 	}
 
-	// 404 doesn't automagitally means an unknown image
+	// 404 doesn't automatically means an unknown image
 	client = &Client{
 		client: newMockClient(errorMock(http.StatusNotFound, "Server error")),
 	}
@@ -37,7 +37,7 @@ func TestContainerCreateImageNotFound(t *testing.T) {
 		client: newMockClient(errorMock(http.StatusNotFound, "No such image")),
 	}
 	_, err := client.ContainerCreate(context.Background(), &container.Config{Image: "unknown_image"}, nil, nil, "unknown")
-	if err == nil || !IsErrImageNotFound(err) {
+	if err == nil || !IsErrNotFound(err) {
 		t.Fatalf("expected an imageNotFound error, got %v", err)
 	}
 }

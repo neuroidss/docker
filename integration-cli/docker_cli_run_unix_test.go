@@ -4,6 +4,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
@@ -16,13 +17,16 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/docker/docker/client"
 	"github.com/docker/docker/integration-cli/checker"
+	"github.com/docker/docker/integration-cli/cli"
+	"github.com/docker/docker/integration-cli/cli/build"
 	"github.com/docker/docker/pkg/homedir"
 	"github.com/docker/docker/pkg/mount"
 	"github.com/docker/docker/pkg/parsers"
 	"github.com/docker/docker/pkg/sysinfo"
-	icmd "github.com/docker/docker/pkg/testutil/cmd"
 	"github.com/go-check/check"
+	"github.com/gotestyourself/gotestyourself/icmd"
 	"github.com/kr/pty"
 )
 
@@ -89,7 +93,7 @@ func (s *DockerSuite) TestRunDeviceDirectory(c *check.C) {
 	c.Assert(strings.Trim(out, "\r\n"), checker.Contains, "seq", check.Commentf("expected output /dev/othersnd/seq"))
 }
 
-// TestRunDetach checks attaching and detaching with the default escape sequence.
+// TestRunAttachDetach checks attaching and detaching with the default escape sequence.
 func (s *DockerSuite) TestRunAttachDetach(c *check.C) {
 	name := "attach-detach"
 
@@ -140,7 +144,7 @@ func (s *DockerSuite) TestRunAttachDetach(c *check.C) {
 	c.Assert(out, checker.Contains, "detach")
 }
 
-// TestRunDetach checks attaching and detaching with the escape sequence specified via flags.
+// TestRunAttachDetachFromFlag checks attaching and detaching with the escape sequence specified via flags.
 func (s *DockerSuite) TestRunAttachDetachFromFlag(c *check.C) {
 	name := "attach-detach"
 	keyCtrlA := []byte{1}
@@ -201,7 +205,7 @@ func (s *DockerSuite) TestRunAttachDetachFromFlag(c *check.C) {
 	c.Assert(running, checker.Equals, "true", check.Commentf("expected container to still be running"))
 }
 
-// TestRunDetach checks attaching and detaching with the escape sequence specified via flags.
+// TestRunAttachDetachFromInvalidFlag checks attaching and detaching with the escape sequence specified via flags.
 func (s *DockerSuite) TestRunAttachDetachFromInvalidFlag(c *check.C) {
 	name := "attach-detach"
 	dockerCmd(c, "run", "--name", name, "-itd", "busybox", "top")
@@ -222,6 +226,7 @@ func (s *DockerSuite) TestRunAttachDetachFromInvalidFlag(c *check.C) {
 	if err := cmd.Start(); err != nil {
 		c.Fatal(err)
 	}
+	go cmd.Wait()
 
 	bufReader := bufio.NewReader(stdout)
 	out, err := bufReader.ReadString('\n')
@@ -229,11 +234,11 @@ func (s *DockerSuite) TestRunAttachDetachFromInvalidFlag(c *check.C) {
 		c.Fatal(err)
 	}
 	// it should print a warning to indicate the detach key flag is invalid
-	errStr := "Invalid escape keys (ctrl-A,a) provided"
+	errStr := "Invalid detach keys (ctrl-A,a) provided"
 	c.Assert(strings.TrimSpace(out), checker.Equals, errStr)
 }
 
-// TestRunDetach checks attaching and detaching with the escape sequence specified via config file.
+// TestRunAttachDetachFromConfig checks attaching and detaching with the escape sequence specified via config file.
 func (s *DockerSuite) TestRunAttachDetachFromConfig(c *check.C) {
 	keyCtrlA := []byte{1}
 	keyA := []byte{97}
@@ -316,7 +321,7 @@ func (s *DockerSuite) TestRunAttachDetachFromConfig(c *check.C) {
 	c.Assert(running, checker.Equals, "true", check.Commentf("expected container to still be running"))
 }
 
-// TestRunDetach checks attaching and detaching with the detach flags, making sure it overrides config file
+// TestRunAttachDetachKeysOverrideConfig checks attaching and detaching with the detach flags, making sure it overrides config file
 func (s *DockerSuite) TestRunAttachDetachKeysOverrideConfig(c *check.C) {
 	keyCtrlA := []byte{1}
 	keyA := []byte{97}
@@ -420,6 +425,7 @@ func (s *DockerSuite) TestRunAttachInvalidDetachKeySequencePreserved(c *check.C)
 	if err := cmd.Start(); err != nil {
 		c.Fatal(err)
 	}
+	go cmd.Wait()
 	c.Assert(waitRun(name), check.IsNil)
 
 	// Invalid escape sequence aba, should print aba in output
@@ -494,11 +500,13 @@ func (s *DockerSuite) TestRunWithKernelMemory(c *check.C) {
 	testRequires(c, kernelMemorySupport)
 
 	file := "/sys/fs/cgroup/memory/memory.kmem.limit_in_bytes"
-	stdout, _, _ := dockerCmdWithStdoutStderr(c, "run", "--kernel-memory", "50M", "--name", "test1", "busybox", "cat", file)
-	c.Assert(strings.TrimSpace(stdout), checker.Equals, "52428800")
+	cli.DockerCmd(c, "run", "--kernel-memory", "50M", "--name", "test1", "busybox", "cat", file).Assert(c, icmd.Expected{
+		Out: "52428800",
+	})
 
-	out := inspectField(c, "test1", "HostConfig.KernelMemory")
-	c.Assert(out, check.Equals, "52428800")
+	cli.InspectCmd(c, "test1", cli.Format(".HostConfig.KernelMemory")).Assert(c, icmd.Expected{
+		Out: "52428800",
+	})
 }
 
 func (s *DockerSuite) TestRunWithInvalidKernelMemory(c *check.C) {
@@ -530,8 +538,9 @@ func (s *DockerSuite) TestRunWithCPUShares(c *check.C) {
 func (s *DockerSuite) TestRunEchoStdoutWithCPUSharesAndMemoryLimit(c *check.C) {
 	testRequires(c, cpuShare)
 	testRequires(c, memoryLimitSupport)
-	out, _, _ := dockerCmdWithStdoutStderr(c, "run", "--cpu-shares", "1000", "-m", "32m", "busybox", "echo", "test")
-	c.Assert(out, checker.Equals, "test\n", check.Commentf("container should've printed 'test'"))
+	cli.DockerCmd(c, "run", "--cpu-shares", "1000", "-m", "32m", "busybox", "echo", "test").Assert(c, icmd.Expected{
+		Out: "test\n",
+	})
 }
 
 func (s *DockerSuite) TestRunWithCpusetCpus(c *check.C) {
@@ -628,11 +637,12 @@ func (s *DockerSuite) TestRunWithMemoryLimit(c *check.C) {
 	testRequires(c, memoryLimitSupport)
 
 	file := "/sys/fs/cgroup/memory/memory.limit_in_bytes"
-	stdout, _, _ := dockerCmdWithStdoutStderr(c, "run", "-m", "32M", "--name", "test", "busybox", "cat", file)
-	c.Assert(strings.TrimSpace(stdout), checker.Equals, "33554432")
-
-	out := inspectField(c, "test", "HostConfig.Memory")
-	c.Assert(out, check.Equals, "33554432")
+	cli.DockerCmd(c, "run", "-m", "32M", "--name", "test", "busybox", "cat", file).Assert(c, icmd.Expected{
+		Out: "33554432",
+	})
+	cli.InspectCmd(c, "test", cli.Format(".HostConfig.Memory")).Assert(c, icmd.Expected{
+		Out: "33554432",
+	})
 }
 
 // TestRunWithoutMemoryswapLimit sets memory limit and disables swap
@@ -669,7 +679,7 @@ func (s *DockerSuite) TestRunWithSwappinessInvalid(c *check.C) {
 }
 
 func (s *DockerSuite) TestRunWithMemoryReservation(c *check.C) {
-	testRequires(c, memoryReservationSupport)
+	testRequires(c, SameHostDaemon, memoryReservationSupport)
 
 	file := "/sys/fs/cgroup/memory/memory.soft_limit_in_bytes"
 	out, _ := dockerCmd(c, "run", "--memory-reservation", "200M", "--name", "test", "busybox", "cat", file)
@@ -681,7 +691,7 @@ func (s *DockerSuite) TestRunWithMemoryReservation(c *check.C) {
 
 func (s *DockerSuite) TestRunWithMemoryReservationInvalid(c *check.C) {
 	testRequires(c, memoryLimitSupport)
-	testRequires(c, memoryReservationSupport)
+	testRequires(c, SameHostDaemon, memoryReservationSupport)
 	out, _, err := dockerCmdWithError("run", "-m", "500M", "--memory-reservation", "800M", "busybox", "true")
 	c.Assert(err, check.NotNil)
 	expected := "Minimum memory limit can not be less than memory reservation limit"
@@ -828,7 +838,7 @@ func (s *DockerSuite) TestRunTmpfsMounts(c *check.C) {
 
 func (s *DockerSuite) TestRunTmpfsMountsOverrideImageVolumes(c *check.C) {
 	name := "img-with-volumes"
-	buildImageSuccessfully(c, name, withDockerfile(`
+	buildImageSuccessfully(c, name, build.WithDockerfile(`
     FROM busybox
     VOLUME /run
     RUN touch /run/stuff
@@ -1009,18 +1019,6 @@ func (s *DockerSuite) TestRunSeccompProfileDenyUnshareUserns(c *check.C) {
 	})
 }
 
-// TestRunSeccompProfileDenyUnusualSocketFamilies checks that rarely used socket families such as Appletalk are blocked by the default profile
-func (s *DockerSuite) TestRunSeccompProfileDenyUnusualSocketFamilies(c *check.C) {
-	testRequires(c, SameHostDaemon, seccompEnabled)
-	ensureSyscallTest(c)
-
-	runCmd := exec.Command(dockerBinary, "run", "syscall-test", "appletalk-test")
-	_, _, err := runCommandWithOutput(runCmd)
-	if err != nil {
-		c.Fatal("expected opening appletalk socket family to fail")
-	}
-}
-
 // TestRunSeccompProfileDenyCloneUserns checks that 'docker run syscall-test'
 // with a the default seccomp profile exits with operation not permitted.
 func (s *DockerSuite) TestRunSeccompProfileDenyCloneUserns(c *check.C) {
@@ -1064,7 +1062,7 @@ func (s *DockerSuite) TestRunSeccompProfileAllow32Bit(c *check.C) {
 	testRequires(c, SameHostDaemon, seccompEnabled, IsAmd64)
 	ensureSyscallTest(c)
 
-	icmd.RunCommand(dockerBinary, "run", "syscall-test", "exit32-test", "id").Assert(c, icmd.Success)
+	icmd.RunCommand(dockerBinary, "run", "syscall-test", "exit32-test").Assert(c, icmd.Success)
 }
 
 // TestRunSeccompAllowSetrlimit checks that 'docker run debian:jessie ulimit -v 1048510' succeeds.
@@ -1140,9 +1138,22 @@ func (s *DockerSuite) TestRunSeccompDefaultProfileNS(c *check.C) {
 	}
 }
 
-// TestRunNoNewPrivSetuid checks that --security-opt=no-new-privileges prevents
+// TestRunNoNewPrivSetuid checks that --security-opt='no-new-privileges=true' prevents
 // effective uid transtions on executing setuid binaries.
 func (s *DockerSuite) TestRunNoNewPrivSetuid(c *check.C) {
+	testRequires(c, DaemonIsLinux, NotUserNamespace, SameHostDaemon)
+	ensureNNPTest(c)
+
+	// test that running a setuid binary results in no effective uid transition
+	icmd.RunCommand(dockerBinary, "run", "--security-opt", "no-new-privileges=true", "--user", "1000",
+		"nnp-test", "/usr/bin/nnp-test").Assert(c, icmd.Expected{
+		Out: "EUID=1000",
+	})
+}
+
+// TestLegacyRunNoNewPrivSetuid checks that --security-opt=no-new-privileges prevents
+// effective uid transtions on executing setuid binaries.
+func (s *DockerSuite) TestLegacyRunNoNewPrivSetuid(c *check.C) {
 	testRequires(c, DaemonIsLinux, NotUserNamespace, SameHostDaemon)
 	ensureNNPTest(c)
 
@@ -1392,7 +1403,7 @@ func (s *DockerSuite) TestRunDeviceSymlink(c *check.C) {
 
 // TestRunPIDsLimit makes sure the pids cgroup is set with --pids-limit
 func (s *DockerSuite) TestRunPIDsLimit(c *check.C) {
-	testRequires(c, pidsLimit)
+	testRequires(c, SameHostDaemon, pidsLimit)
 
 	file := "/sys/fs/cgroup/pids/pids.max"
 	out, _ := dockerCmd(c, "run", "--name", "skittles", "--pids-limit", "4", "busybox", "cat", file)
@@ -1556,14 +1567,18 @@ func (s *DockerSuite) TestRunWithNanoCPUs(c *check.C) {
 	out, _ := dockerCmd(c, "run", "--cpus", "0.5", "--name", "test", "busybox", "sh", "-c", fmt.Sprintf("cat %s && cat %s", file1, file2))
 	c.Assert(strings.TrimSpace(out), checker.Equals, "50000\n100000")
 
-	out = inspectField(c, "test", "HostConfig.NanoCpus")
-	c.Assert(out, checker.Equals, "5e+08", check.Commentf("setting the Nano CPUs failed"))
+	clt, err := client.NewEnvClient()
+	c.Assert(err, checker.IsNil)
+	inspect, err := clt.ContainerInspect(context.Background(), "test")
+	c.Assert(err, checker.IsNil)
+	c.Assert(inspect.HostConfig.NanoCPUs, checker.Equals, int64(500000000))
+
 	out = inspectField(c, "test", "HostConfig.CpuQuota")
 	c.Assert(out, checker.Equals, "0", check.Commentf("CPU CFS quota should be 0"))
 	out = inspectField(c, "test", "HostConfig.CpuPeriod")
 	c.Assert(out, checker.Equals, "0", check.Commentf("CPU CFS period should be 0"))
 
-	out, _, err := dockerCmdWithError("run", "--cpus", "0.5", "--cpu-quota", "50000", "--cpu-period", "100000", "busybox", "sh")
+	out, _, err = dockerCmdWithError("run", "--cpus", "0.5", "--cpu-quota", "50000", "--cpu-period", "100000", "busybox", "sh")
 	c.Assert(err, check.NotNil)
 	c.Assert(out, checker.Contains, "Conflicting options: Nano CPUs and CPU Period cannot both be set")
 }

@@ -8,10 +8,10 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/Sirupsen/logrus"
 	"github.com/docker/docker/pkg/ioutils"
 	"github.com/docker/libnetwork/resolvconf/dns"
 	"github.com/docker/libnetwork/types"
+	"github.com/sirupsen/logrus"
 )
 
 var (
@@ -178,7 +178,14 @@ func GetNameservers(resolvConf []byte, kind int) []string {
 func GetNameserversAsCIDR(resolvConf []byte) []string {
 	nameservers := []string{}
 	for _, nameserver := range GetNameservers(resolvConf, types.IP) {
-		nameservers = append(nameservers, nameserver+"/32")
+		var address string
+		// If IPv6, strip zone if present
+		if strings.Contains(nameserver, ":") {
+			address = strings.Split(nameserver, "%")[0] + "/128"
+		} else {
+			address = nameserver + "/32"
+		}
+		nameservers = append(nameservers, address)
 	}
 	return nameservers
 }

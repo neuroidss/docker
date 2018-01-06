@@ -2,12 +2,15 @@ package splunk
 
 import (
 	"compress/gzip"
+	"context"
 	"fmt"
 	"os"
+	"runtime"
 	"testing"
 	"time"
 
 	"github.com/docker/docker/daemon/logger"
+	"github.com/stretchr/testify/require"
 )
 
 // Validate options
@@ -25,9 +28,10 @@ func TestValidateLogOpt(t *testing.T) {
 		splunkVerifyConnectionKey:     "true",
 		splunkGzipCompressionKey:      "true",
 		splunkGzipCompressionLevelKey: "1",
-		envKey:    "a",
-		labelsKey: "b",
-		tagKey:    "c",
+		envKey:      "a",
+		envRegexKey: "^foo",
+		labelsKey:   "b",
+		tagKey:      "c",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -124,7 +128,7 @@ func TestDefault(t *testing.T) {
 		splunkLoggerDriver.nullMessage.Source != "" ||
 		splunkLoggerDriver.nullMessage.SourceType != "" ||
 		splunkLoggerDriver.nullMessage.Index != "" ||
-		splunkLoggerDriver.gzipCompression != false ||
+		splunkLoggerDriver.gzipCompression ||
 		splunkLoggerDriver.postMessagesFrequency != defaultPostMessagesFrequency ||
 		splunkLoggerDriver.postMessagesBatchSize != defaultPostMessagesBatchSize ||
 		splunkLoggerDriver.bufferMaximum != defaultBufferMaximum ||
@@ -133,11 +137,11 @@ func TestDefault(t *testing.T) {
 	}
 
 	message1Time := time.Now()
-	if err := loggerDriver.Log(&logger.Message{[]byte("{\"a\":\"b\"}"), "stdout", message1Time, nil, false}); err != nil {
+	if err := loggerDriver.Log(&logger.Message{Line: []byte("{\"a\":\"b\"}"), Source: "stdout", Timestamp: message1Time}); err != nil {
 		t.Fatal(err)
 	}
 	message2Time := time.Now()
-	if err := loggerDriver.Log(&logger.Message{[]byte("notajson"), "stdout", message2Time, nil, false}); err != nil {
+	if err := loggerDriver.Log(&logger.Message{Line: []byte("notajson"), Source: "stdout", Timestamp: message2Time}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -215,8 +219,9 @@ func TestInlineFormatWithNonDefaultOptions(t *testing.T) {
 			splunkIndexKey:           "myindex",
 			splunkFormatKey:          splunkFormatInline,
 			splunkGzipCompressionKey: "true",
-			tagKey:    "{{.ImageName}}/{{.Name}}",
-			labelsKey: "a",
+			tagKey:      "{{.ImageName}}/{{.Name}}",
+			labelsKey:   "a",
+			envRegexKey: "^foo",
 		},
 		ContainerID:        "containeriid",
 		ContainerName:      "/container_name",
@@ -225,6 +230,7 @@ func TestInlineFormatWithNonDefaultOptions(t *testing.T) {
 		ContainerLabels: map[string]string{
 			"a": "b",
 		},
+		ContainerEnv: []string{"foo_finder=bar"},
 	}
 
 	hostname, err := info.Hostname()
@@ -252,7 +258,7 @@ func TestInlineFormatWithNonDefaultOptions(t *testing.T) {
 		splunkLoggerDriver.nullMessage.Source != "mysource" ||
 		splunkLoggerDriver.nullMessage.SourceType != "mysourcetype" ||
 		splunkLoggerDriver.nullMessage.Index != "myindex" ||
-		splunkLoggerDriver.gzipCompression != true ||
+		!splunkLoggerDriver.gzipCompression ||
 		splunkLoggerDriver.gzipCompressionLevel != gzip.DefaultCompression ||
 		splunkLoggerDriver.postMessagesFrequency != defaultPostMessagesFrequency ||
 		splunkLoggerDriver.postMessagesBatchSize != defaultPostMessagesBatchSize ||
@@ -262,7 +268,7 @@ func TestInlineFormatWithNonDefaultOptions(t *testing.T) {
 	}
 
 	messageTime := time.Now()
-	if err := loggerDriver.Log(&logger.Message{[]byte("1"), "stdout", messageTime, nil, false}); err != nil {
+	if err := loggerDriver.Log(&logger.Message{Line: []byte("1"), Source: "stdout", Timestamp: messageTime}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -295,6 +301,7 @@ func TestInlineFormatWithNonDefaultOptions(t *testing.T) {
 			event["source"] != "stdout" ||
 			event["tag"] != "container_image_name/container_name" ||
 			event["attrs"].(map[string]interface{})["a"] != "b" ||
+			event["attrs"].(map[string]interface{})["foo_finder"] != "bar" ||
 			len(event) != 4 {
 			t.Fatalf("Unexpected event in message %v", event)
 		}
@@ -351,7 +358,7 @@ func TestJsonFormat(t *testing.T) {
 		splunkLoggerDriver.nullMessage.Source != "" ||
 		splunkLoggerDriver.nullMessage.SourceType != "" ||
 		splunkLoggerDriver.nullMessage.Index != "" ||
-		splunkLoggerDriver.gzipCompression != true ||
+		!splunkLoggerDriver.gzipCompression ||
 		splunkLoggerDriver.gzipCompressionLevel != gzip.BestSpeed ||
 		splunkLoggerDriver.postMessagesFrequency != defaultPostMessagesFrequency ||
 		splunkLoggerDriver.postMessagesBatchSize != defaultPostMessagesBatchSize ||
@@ -361,11 +368,11 @@ func TestJsonFormat(t *testing.T) {
 	}
 
 	message1Time := time.Now()
-	if err := loggerDriver.Log(&logger.Message{[]byte("{\"a\":\"b\"}"), "stdout", message1Time, nil, false}); err != nil {
+	if err := loggerDriver.Log(&logger.Message{Line: []byte("{\"a\":\"b\"}"), Source: "stdout", Timestamp: message1Time}); err != nil {
 		t.Fatal(err)
 	}
 	message2Time := time.Now()
-	if err := loggerDriver.Log(&logger.Message{[]byte("notjson"), "stdout", message2Time, nil, false}); err != nil {
+	if err := loggerDriver.Log(&logger.Message{Line: []byte("notjson"), Source: "stdout", Timestamp: message2Time}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -444,14 +451,10 @@ func TestRawFormat(t *testing.T) {
 	}
 
 	hostname, err := info.Hostname()
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 
 	loggerDriver, err := New(info)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 
 	if !hec.connectionVerified {
 		t.Fatal("By default connection should be verified")
@@ -468,7 +471,7 @@ func TestRawFormat(t *testing.T) {
 		splunkLoggerDriver.nullMessage.Source != "" ||
 		splunkLoggerDriver.nullMessage.SourceType != "" ||
 		splunkLoggerDriver.nullMessage.Index != "" ||
-		splunkLoggerDriver.gzipCompression != false ||
+		splunkLoggerDriver.gzipCompression ||
 		splunkLoggerDriver.postMessagesFrequency != defaultPostMessagesFrequency ||
 		splunkLoggerDriver.postMessagesBatchSize != defaultPostMessagesBatchSize ||
 		splunkLoggerDriver.bufferMaximum != defaultBufferMaximum ||
@@ -478,11 +481,11 @@ func TestRawFormat(t *testing.T) {
 	}
 
 	message1Time := time.Now()
-	if err := loggerDriver.Log(&logger.Message{[]byte("{\"a\":\"b\"}"), "stdout", message1Time, nil, false}); err != nil {
+	if err := loggerDriver.Log(&logger.Message{Line: []byte("{\"a\":\"b\"}"), Source: "stdout", Timestamp: message1Time}); err != nil {
 		t.Fatal(err)
 	}
 	message2Time := time.Now()
-	if err := loggerDriver.Log(&logger.Message{[]byte("notjson"), "stdout", message2Time, nil, false}); err != nil {
+	if err := loggerDriver.Log(&logger.Message{Line: []byte("notjson"), Source: "stdout", Timestamp: message2Time}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -582,7 +585,7 @@ func TestRawFormatWithLabels(t *testing.T) {
 		splunkLoggerDriver.nullMessage.Source != "" ||
 		splunkLoggerDriver.nullMessage.SourceType != "" ||
 		splunkLoggerDriver.nullMessage.Index != "" ||
-		splunkLoggerDriver.gzipCompression != false ||
+		splunkLoggerDriver.gzipCompression ||
 		splunkLoggerDriver.postMessagesFrequency != defaultPostMessagesFrequency ||
 		splunkLoggerDriver.postMessagesBatchSize != defaultPostMessagesBatchSize ||
 		splunkLoggerDriver.bufferMaximum != defaultBufferMaximum ||
@@ -592,11 +595,11 @@ func TestRawFormatWithLabels(t *testing.T) {
 	}
 
 	message1Time := time.Now()
-	if err := loggerDriver.Log(&logger.Message{[]byte("{\"a\":\"b\"}"), "stdout", message1Time, nil, false}); err != nil {
+	if err := loggerDriver.Log(&logger.Message{Line: []byte("{\"a\":\"b\"}"), Source: "stdout", Timestamp: message1Time}); err != nil {
 		t.Fatal(err)
 	}
 	message2Time := time.Now()
-	if err := loggerDriver.Log(&logger.Message{[]byte("notjson"), "stdout", message2Time, nil, false}); err != nil {
+	if err := loggerDriver.Log(&logger.Message{Line: []byte("notjson"), Source: "stdout", Timestamp: message2Time}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -694,7 +697,7 @@ func TestRawFormatWithoutTag(t *testing.T) {
 		splunkLoggerDriver.nullMessage.Source != "" ||
 		splunkLoggerDriver.nullMessage.SourceType != "" ||
 		splunkLoggerDriver.nullMessage.Index != "" ||
-		splunkLoggerDriver.gzipCompression != false ||
+		splunkLoggerDriver.gzipCompression ||
 		splunkLoggerDriver.postMessagesFrequency != defaultPostMessagesFrequency ||
 		splunkLoggerDriver.postMessagesBatchSize != defaultPostMessagesBatchSize ||
 		splunkLoggerDriver.bufferMaximum != defaultBufferMaximum ||
@@ -705,11 +708,15 @@ func TestRawFormatWithoutTag(t *testing.T) {
 	}
 
 	message1Time := time.Now()
-	if err := loggerDriver.Log(&logger.Message{[]byte("{\"a\":\"b\"}"), "stdout", message1Time, nil, false}); err != nil {
+	if err := loggerDriver.Log(&logger.Message{Line: []byte("{\"a\":\"b\"}"), Source: "stdout", Timestamp: message1Time}); err != nil {
 		t.Fatal(err)
 	}
 	message2Time := time.Now()
-	if err := loggerDriver.Log(&logger.Message{[]byte("notjson"), "stdout", message2Time, nil, false}); err != nil {
+	if err := loggerDriver.Log(&logger.Message{Line: []byte("notjson"), Source: "stdout", Timestamp: message2Time}); err != nil {
+		t.Fatal(err)
+	}
+	message3Time := time.Now()
+	if err := loggerDriver.Log(&logger.Message{Line: []byte(" "), Source: "stdout", Timestamp: message3Time}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -718,6 +725,9 @@ func TestRawFormatWithoutTag(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// message3 would have an empty or whitespace only string in the "event" field
+	// both of which are not acceptable to HEC
+	// thus here we must expect 2 messages, not 3
 	if len(hec.messages) != 2 {
 		t.Fatal("Expected two messages")
 	}
@@ -790,7 +800,7 @@ func TestBatching(t *testing.T) {
 	}
 
 	for i := 0; i < defaultStreamChannelSize*4; i++ {
-		if err := loggerDriver.Log(&logger.Message{[]byte(fmt.Sprintf("%d", i)), "stdout", time.Now(), nil, false}); err != nil {
+		if err := loggerDriver.Log(&logger.Message{Line: []byte(fmt.Sprintf("%d", i)), Source: "stdout", Timestamp: time.Now()}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -856,7 +866,7 @@ func TestFrequency(t *testing.T) {
 	}
 
 	for i := 0; i < 10; i++ {
-		if err := loggerDriver.Log(&logger.Message{[]byte(fmt.Sprintf("%d", i)), "stdout", time.Now(), nil, false}); err != nil {
+		if err := loggerDriver.Log(&logger.Message{Line: []byte(fmt.Sprintf("%d", i)), Source: "stdout", Timestamp: time.Now()}); err != nil {
 			t.Fatal(err)
 		}
 		time.Sleep(15 * time.Millisecond)
@@ -937,7 +947,7 @@ func TestOneMessagePerRequest(t *testing.T) {
 	}
 
 	for i := 0; i < 10; i++ {
-		if err := loggerDriver.Log(&logger.Message{[]byte(fmt.Sprintf("%d", i)), "stdout", time.Now(), nil, false}); err != nil {
+		if err := loggerDriver.Log(&logger.Message{Line: []byte(fmt.Sprintf("%d", i)), Source: "stdout", Timestamp: time.Now()}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -1045,7 +1055,7 @@ func TestSkipVerify(t *testing.T) {
 	}
 
 	for i := 0; i < defaultStreamChannelSize*2; i++ {
-		if err := loggerDriver.Log(&logger.Message{[]byte(fmt.Sprintf("%d", i)), "stdout", time.Now(), nil, false}); err != nil {
+		if err := loggerDriver.Log(&logger.Message{Line: []byte(fmt.Sprintf("%d", i)), Source: "stdout", Timestamp: time.Now()}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -1054,10 +1064,10 @@ func TestSkipVerify(t *testing.T) {
 		t.Fatal("No messages should be accepted at this point")
 	}
 
-	hec.simulateServerError = false
+	hec.simulateErr(false)
 
 	for i := defaultStreamChannelSize * 2; i < defaultStreamChannelSize*4; i++ {
-		if err := loggerDriver.Log(&logger.Message{[]byte(fmt.Sprintf("%d", i)), "stdout", time.Now(), nil, false}); err != nil {
+		if err := loggerDriver.Log(&logger.Message{Line: []byte(fmt.Sprintf("%d", i)), Source: "stdout", Timestamp: time.Now()}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -1102,7 +1112,7 @@ func TestBufferMaximum(t *testing.T) {
 	}
 
 	hec := NewHTTPEventCollectorMock(t)
-	hec.simulateServerError = true
+	hec.simulateErr(true)
 	go hec.Serve()
 
 	info := logger.Info{
@@ -1127,7 +1137,7 @@ func TestBufferMaximum(t *testing.T) {
 	}
 
 	for i := 0; i < 11; i++ {
-		if err := loggerDriver.Log(&logger.Message{[]byte(fmt.Sprintf("%d", i)), "stdout", time.Now(), nil, false}); err != nil {
+		if err := loggerDriver.Log(&logger.Message{Line: []byte(fmt.Sprintf("%d", i)), Source: "stdout", Timestamp: time.Now()}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -1216,7 +1226,7 @@ func TestServerAlwaysDown(t *testing.T) {
 	}
 
 	for i := 0; i < 5; i++ {
-		if err := loggerDriver.Log(&logger.Message{[]byte(fmt.Sprintf("%d", i)), "stdout", time.Now(), nil, false}); err != nil {
+		if err := loggerDriver.Log(&logger.Message{Line: []byte(fmt.Sprintf("%d", i)), Source: "stdout", Timestamp: time.Now()}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -1269,7 +1279,7 @@ func TestCannotSendAfterClose(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := loggerDriver.Log(&logger.Message{[]byte("message1"), "stdout", time.Now(), nil, false}); err != nil {
+	if err := loggerDriver.Log(&logger.Message{Line: []byte("message1"), Source: "stdout", Timestamp: time.Now()}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1278,7 +1288,7 @@ func TestCannotSendAfterClose(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := loggerDriver.Log(&logger.Message{[]byte("message2"), "stdout", time.Now(), nil, false}); err == nil {
+	if err := loggerDriver.Log(&logger.Message{Line: []byte("message2"), Source: "stdout", Timestamp: time.Now()}); err == nil {
 		t.Fatal("Driver should not allow to send messages after close")
 	}
 
@@ -1298,5 +1308,50 @@ func TestCannotSendAfterClose(t *testing.T) {
 	err = hec.Close()
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestDeadlockOnBlockedEndpoint(t *testing.T) {
+	hec := NewHTTPEventCollectorMock(t)
+	go hec.Serve()
+	info := logger.Info{
+		Config: map[string]string{
+			splunkURLKey:   hec.URL(),
+			splunkTokenKey: hec.token,
+		},
+		ContainerID:        "containeriid",
+		ContainerName:      "/container_name",
+		ContainerImageID:   "contaimageid",
+		ContainerImageName: "container_image_name",
+	}
+
+	l, err := New(info)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, unblock := context.WithCancel(context.Background())
+	hec.withBlock(ctx)
+	defer unblock()
+
+	batchSendTimeout = 1 * time.Second
+
+	if err := l.Log(&logger.Message{}); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		l.Close()
+		close(done)
+	}()
+
+	select {
+	case <-time.After(60 * time.Second):
+		buf := make([]byte, 1e6)
+		buf = buf[:runtime.Stack(buf, true)]
+		t.Logf("STACK DUMP: \n\n%s\n\n", string(buf))
+		t.Fatal("timeout waiting for close to finish")
+	case <-done:
 	}
 }

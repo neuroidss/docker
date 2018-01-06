@@ -27,8 +27,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Sirupsen/logrus"
 	"github.com/docker/go-connections/tlsconfig"
+	"github.com/sirupsen/logrus"
 )
 
 var (
@@ -169,7 +169,7 @@ func (p *Plugin) activateWithLock() error {
 
 func (p *Plugin) waitActive() error {
 	p.activateWait.L.Lock()
-	for !p.activated() {
+	for !p.activated() && p.activateErr == nil {
 		p.activateWait.Wait()
 	}
 	p.activateWait.L.Unlock()
